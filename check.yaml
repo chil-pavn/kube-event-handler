@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: clm
+spec:
+    selector:
+        matchLabels:
+            app: clm
+    replicas: 1
+    template:
+        metadata:
+            name: clm
+            labels:
+                app: clm
+        spec:
+            hostname: clm
+            containers:
+                - name: clm
+                  image: "datazip/cl-master:stable-v0.0.5"
+                  resources:
+                    requests:
+                      memory: "0.1Gi"
+                      cpu: "0.1"
+                    limits:
+                      memory: "1Gi"
+                      cpu: "0.4"
+                  imagePullPolicy: Always

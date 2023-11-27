@@ -1,0 +1,21 @@
+apiVersion: api.chil-pavn.online/v1alpha1
+kind: Notifier
+metadata:
+  labels:
+    app.kubernetes.io/name: notifier
+    app.kubernetes.io/instance: notifier-sample
+    app.kubernetes.io/part-of: kube-event-operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: kube-event-operator
+  name: notifier-sample
+spec:
+  # TODO(user): Add fields here
+  deployments:
+    - name: clm
+      namespace: default
+      status: Running # Remove this, not needed
+  statefulsets:
+    - name: clickhouse
+      namespace: default
+      status: Running # Remove this, not needed
+
