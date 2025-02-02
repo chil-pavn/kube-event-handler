@@ -11,8 +11,8 @@ metadata:
 spec:
   # TODO(user): Add fields here
   deployments:
-    - name: clm
-      namespace: default
+    - name: slack-notifier
+      namespace: kube-system
       status: Running # Remove this, not needed
   statefulsets:
     - name: clickhouse

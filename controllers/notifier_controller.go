@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	// "google.golang.org/appengine/log"
@@ -59,128 +60,126 @@ func (r *NotifierReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// TODO(user): your logic here
 	log := logger.WithValues("Request.Namespace", req.Namespace, "Request.Name", req.Name)
-	log.Info("Reconcilecalled")
+	log.Info("Reconcile called")
+	
 	notifier := &apiv1alpha1.Notifier{}
-	err := r.Get(ctx, req.NamespacedName, notifier)
-	if err != nil {
+	if err := r.Get(ctx, req.NamespacedName, notifier); err != nil {
 		if apierrors.IsNotFound(err) {
-			log.Info("Scaler resource not found. Ignoring since object must be deleted.")
+			log.Info("Notifier resource not found. Ignoring since object must be deleted.")
 			return ctrl.Result{}, nil
 		}
-		log.Error(err, "Failed")
+		log.Error(err, "Failed to get Notifier")
 		return ctrl.Result{}, err
 	}
 
 	for _, deploy := range notifier.Spec.Deployments {
 		dep := &v1.Deployment{}
-		err := r.Get(ctx, types.NamespacedName{
+		if err := r.Get(ctx, types.NamespacedName{
 			Namespace: deploy.Namespace,
 			Name:      deploy.Name,
-		}, dep)
-		if err != nil {
+		}, dep); err != nil {
+			log.Error(err, "Failed to get Deployment", "deployment", deploy.Name)
 			return ctrl.Result{}, err
-		}
-		status := deploy.Status
-		r.getPodStatus(ctx, dep)
-		if err != nil {
-			log.Error(err, "unable to fetch Pods Status for Deployment")
-			return ctrl.Result{}, err
-		}
-		if status != "running" {
-			log.Info("checking")
 		}
 
+		if _, err := r.getPodStatus(ctx, dep); err != nil {
+			log.Error(err, "Failed to get pod status", "deployment", deploy.Name)
+			return ctrl.Result{}, err
+		}
 	}
 
-	return ctrl.Result{RequeueAfter: time.Duration(10 * time.Second)}, nil
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
 func (r *NotifierReconciler) getPodStatus(ctx context.Context, deployment *v1.Deployment) (ctrl.Result, error) {
 
 	podList, err := r.getPodsForDeployment(ctx, deployment)
 	if err != nil {
-		logger.Error(err, "unable to fetch Pods for Deployment")
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fmt.Errorf("failed to fetch pods for deployment: %w", err)
 	}
 
 	// Process pods as needed
 	for _, pod := range podList.Items {
-		logger.Info("Pod Name", "Name", pod.Name)
-		logger.Info("Pod Status", "Status", pod.Status.Phase)
+		logger.Info("Processing pod", "name", pod.Name, "status", pod.Status.Phase)
 
 		if pod.Status.Phase != corev1.PodRunning && pod.Status.Phase != corev1.PodSucceeded {
-			// TODO: If Pod is in Pending state , Failed, Unknown State
-			return ctrl.Result{}, err
+			failureMsg := fmt.Sprintf("Pod %s in namespace %s is in %s state", 
+				pod.Name, pod.Namespace, pod.Status.Phase)
+			if err := ProcessFailure(failureMsg); err != nil {
+				logger.Error(err, "Failed to process pod failure notification",
+					"pod", pod.Name,
+					"namespace", pod.Namespace,
+					"phase", pod.Status.Phase)
+				continue
+			}
 		}
 
 		// Pod can be in Running phase but the container can go to Waiting Terminated etc
 		containerCurrentState, containerLastState, err := r.fetchContainerStatus(ctx, pod)
 
 		if err != nil {
-			logger.Error(err, "unable to fetch the container state for the pod")
-		}
-		// Pod can be Running phase but the container can go to Waiting Terminated etc
-		if containerCurrentState.Waiting != nil {
-			// Delete the pod
-			logger.Info("Deleting pod", "PodName", pod.Name)
-			if err := r.Delete(ctx, &pod); err != nil {
-				logger.Error(err, "Failed to delete pod", "PodName", pod.Name)
-				// Handle the error as needed
-			} else {
-				logger.Info("Pod deleted successfully", "PodName", pod.Name)
-			}
-
-			if containerLastState.Terminated != nil {
-				logger.Info("Last State", "Terminated, Reason:", containerLastState.Terminated.Reason)
-				if containerLastState.Terminated.Reason == "CrashLoopBackOff" {
-					logger.Info("CRASHLOOPBACKOFF")
-				}
-				if containerLastState.Terminated.Reason == "OOMKilled" {
-					logger.Info("Last State: ", "OOMKilled", "Will trigger scale up")
-				}
-
-			}
+			logger.Error(err, "Failed to fetch container status", "pod", pod.Name)
+			continue
 		}
 
-		if containerCurrentState.Terminated != nil {
-			logger.Info("This container is Terminated")
+		if err := r.handleContainerState(ctx, pod, containerCurrentState, containerLastState); err != nil {
+			logger.Error(err, "Failed to handle container state", "pod", pod.Name)
+			continue
 		}
-
 	}
-	// Add your custom logic to handle pod status as needed
-	// For example, you could check if the pod is running, ready, etc.
-	// You might want to trigger some action based on the pod status.
+
 	return ctrl.Result{}, nil
 }
 
-func (r *NotifierReconciler) fetchContainerStatus(ctx context.Context, pod corev1.Pod) (corev1.ContainerState, corev1.ContainerState, error) {
-	for _, container := range pod.Status.ContainerStatuses {
-		containerName := container.Name
-		containerState := container.State
-		containerLastState := container.LastTerminationState
+// New helper function to handle container state
+func (r *NotifierReconciler) handleContainerState(ctx context.Context, pod corev1.Pod, currentState, lastState corev1.ContainerState) error {
+	if currentState.Waiting != nil {
+		// Delete the pod
+		if err := r.Delete(ctx, &pod); err != nil {
+			return fmt.Errorf("failed to delete pod %s: %w", pod.Name, err)
+		}
+		logger.Info("Pod deleted successfully", "podName", pod.Name)
 
-		logger.Info("Container Name", "Name", containerName)
-		// logger.Info("Container Current State", "State", containerState)
-		// logger.Info("Container Last State", "LastState", containerLastState)
+		failureMsg := fmt.Sprintf("Container in pod %s is in waiting state. Reason: %s, Message: %s",
+			pod.Name, currentState.Waiting.Reason, currentState.Waiting.Message)
+		return ProcessFailure(failureMsg)
+	}
 
-		// Check if the container is not running
-		if containerState.Running == nil {
-			// Container is not running
-			logger.Info("Container is not running")
+	if currentState.Terminated != nil {
+		failureMsg := fmt.Sprintf("Container in pod %s is terminated. Reason: %s, Message: %s",
+			pod.Name, currentState.Terminated.Reason, currentState.Terminated.Message)
+		return ProcessFailure(failureMsg)
+	}
 
-			// Print state and reason
-			if containerState.Waiting != nil {
-				logger.Info("Container Waiting State", "Reason", containerState.Waiting.Reason)
-				logger.Info("Container Waiting State", "Message", containerState.Waiting.Message)
-				return containerState, containerLastState, nil
-			} else if containerState.Terminated != nil {
-				logger.Info("Container Terminated State", "Reason", containerState.Terminated.Reason)
-				logger.Info("Container Terminated State", "Message", containerState.Terminated.Message)
-				return containerState, containerLastState, nil
-			}
+	if lastState.Terminated != nil {
+		switch lastState.Terminated.Reason {
+		case "CrashLoopBackOff":
+			return ProcessFailure(fmt.Sprintf("Pod %s is in CrashLoopBackOff state", pod.Name))
+		case "OOMKilled":
+			return ProcessFailure(fmt.Sprintf("Pod %s was OOMKilled", pod.Name))
 		}
 	}
-	return corev1.ContainerState{}, corev1.ContainerState{}, nil
+	// Add your custom logic to handle pod status as needed
+    // For example, you could check if the pod is running, ready, etc.
+    // You might want to trigger some action based on the pod status.
+	return nil
+}
+
+func (r *NotifierReconciler) fetchContainerStatus(_ context.Context, pod corev1.Pod) (corev1.ContainerState, corev1.ContainerState, error) {
+	if len(pod.Status.ContainerStatuses) == 0 {
+		return corev1.ContainerState{}, corev1.ContainerState{}, fmt.Errorf("no container statuses found for pod %s", pod.Name)
+	}
+
+	// We'll check the first container's status
+	container := pod.Status.ContainerStatuses[0]
+	
+	logger.Info("Container status", 
+		"pod", pod.Name,
+		"container", container.Name,
+		"ready", container.Ready,
+		"restartCount", container.RestartCount)
+
+	return container.State, container.LastTerminationState, nil
 }
 
 func (r *NotifierReconciler) getPodsForDeployment(ctx context.Context, deployment *v1.Deployment) (*corev1.PodList, error) {

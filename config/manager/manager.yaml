@@ -98,5 +98,18 @@ spec:
           requests:
             cpu: 10m
             memory: 64Mi
+        env:
+          - name: DEBUG_MODE
+            value: "true"  # Set to "false" in production
+          - name: SLACK_WEBHOOK_URL
+            valueFrom:
+              secretKeyRef:
+                name: notifier-secrets
+                key: slack-webhook-url
+          - name: OPENAI_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: notifier-secrets
+                key: openai-api-key
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10
